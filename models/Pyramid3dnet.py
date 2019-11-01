@@ -34,7 +34,8 @@ class OutputUpsampler(nn.Module):
                                padding=2, output_padding=1),
             nn.ReLU(inplace=True),
             nn.BatchNorm3d(mid_channels),
-            nn.Conv3d(in_channels=mid_channels, out_channels=out_channels, kernel_size=(2, 3, 3), padding=(0, 1, 1))
+            nn.Conv3d(in_channels=mid_channels, out_channels=out_channels, kernel_size=(2, 3, 3), padding=(0, 1, 1)),
+            nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -45,7 +46,8 @@ class FlowPrediction(nn.Module):
     def __init__(self, in_channels=16, out_channels=2, depth=10):
         super(FlowPrediction, self).__init__()
         self.predict = nn.Sequential(
-            nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=(2, 3, 3), padding=(0, 1, 1)))
+            nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=(2, 3, 3), padding=(0, 1, 1)),
+            nn.Sigmoid())
 
     def forward(self, x):
         return self.predict(x)
@@ -129,7 +131,7 @@ class PyramidUNet(nn.Module):
         super(PyramidUNet, self).__init__()
 
         self.input = InputDownsampler(in_channel, init_feature, depth)
-        # self.cstinput = InputDownsampler(in_channel, init_feature, depth)
+        self.cstinput = InputDownsampler(in_channel, init_feature, depth)
 
         self.downsample_0 = Downsampler(init_feature, init_feature * 2)
         self.downsample_1 = Downsampler(init_feature * 2, init_feature * 4)
@@ -177,10 +179,11 @@ class PyramidUNet(nn.Module):
                 [torch.Size([1, 2, 9, 27, 64]) -> forward_latent_flow
                 torch.Size([1, 2, 9, 27, 64]) -> backward_latent_flow]
         """
-        out = self.input(x)
-        # out = self.cstinput(x)
-        # out = outx + outcst
+        outin = self.input(x)
+        outcst = self.cstinput(x)
+        out = outin + outcst
 
+        # out = self.cstinput(x)
         out_0, bypass_0 = self.downsample_0(out)
         out_1, bypass_1 = self.downsample_1(out_0)
         out_2, bypass_2 = self.downsample_2(out_1)
@@ -193,13 +196,10 @@ class PyramidUNet(nn.Module):
 
 
         finalflow_b = self.finalflow_f(pyramid_0)
+        finalflow_f = self.finalflow_f(pyramid_0)
+        finalflow = (finalflow_f, finalflow_b)
 
         if self.training:
-
-            finalflow_f = self.finalflow_f(pyramid_0)
-
-
-
             latentflow_f = self.latentflow_f(latentout)
 
             latentflow_b = self.latentflow_b(latentout)
@@ -214,14 +214,14 @@ class PyramidUNet(nn.Module):
             latentflow = (latentflow_f, latentflow_b)
             pyramidflow_2 = (pyramidflow_2f, pyramidflow_2b)
             pyramidflow_1 = (pyramidflow_1f, pyramidflow_1b)
-            finalflow = (finalflow_f, finalflow_b)
+
 
             flows = (finalflow, pyramidflow_1, pyramidflow_2, latentflow)
 
             return flows
 
         else:
-            return finalflow_b
+            return finalflow
 
     def cst3d(frames):
         frames = frames.permute(0, 2, 1, 3, 4)

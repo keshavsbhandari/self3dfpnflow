@@ -12,7 +12,7 @@ from tqdm import tqdm
 from dataloader.sintelloader3d import SintelLoader3D
 from models.Pyramid3dnet import PyramidUNet
 from utils import (warper, AverageMeter, flow2rgb, replicatechannel,computeocclusion, ResizeImage)
-
+from torchvision.transforms import (ToTensor, ToPILImage)
 
 class FlowTrainer(object):
     def __init__(self):
@@ -22,7 +22,7 @@ class FlowTrainer(object):
 
         self.epoch = 1000
         self.dataloader = SintelLoader3D()
-        self.gpu_ids = [0, 1, 2, 3]
+        self.gpu_ids = [0, 1,2]
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.01)
         self.scheduler = CosineAnnealingLR(self.optimizer, len(self.dataloader.train()))
@@ -56,7 +56,7 @@ class FlowTrainer(object):
         fb_ = self.warper(fb, frame, 'fb')
         warpframe = (ff_, fb_)
         occlusion = self.occwarper(ff, fb)
-        return warpframe, occlusion
+        return occlusion, warpframe
 
     #     def warpocclusion(self, ff, fb):
     #         return self.occwarper(ff,fb)
@@ -73,9 +73,9 @@ class FlowTrainer(object):
             # GET X and Frame 2
             # wdt = data['displacement'].to(self.device)
             frame = data['frame'].to(self.device)
-            flow = data['flow'].to(self.device)
-            frame.requires_grad = True
-            flow.requires_grad = True
+            flow = data['flow'].cpu()
+            # frame.requires_grad = True
+            flow.requires_grad = False
             """
             NOTE : THIS MUST BE ADJUSTED AT DATA LOADER SIDE 
             torch.Size([1, 2, 9, 436, 1024])    -> finalflow size
@@ -84,29 +84,29 @@ class FlowTrainer(object):
             torch.Size([1, 2, 9, 27, 64])       -> pyraflow3 size
             """
             pyra1_frame = data['pyra1_frame'].to(self.device)
-            pyra1_frame.requires_grad = True
+            # pyra1_frame.requires_grad = True
             pyra2_frame = data['pyra2_frame'].to(self.device)
-            pyra2_frame.requires_grad = True
+            # pyra2_frame.requires_grad = True
             laten_frame = data['laten_frame'].to(self.device)
-            laten_frame.requires_grad = True
+            # laten_frame.requires_grad = True
 
             self.optimizer.zero_grad()
             # forward
             with torch.set_grad_enabled(True):
                 finalflow, pyraflow1, pyraflow2, latenflow = self.model(frame)
-
-
                 occlu_final, frame_final = self.warpframes(*finalflow, frame)
                 occlu_pyra1, frame_pyra1 = self.warpframes(*pyraflow1, pyra1_frame)
                 occlu_pyra2, frame_pyra2 = self.warpframes(*pyraflow2, pyra2_frame)
                 occlu_laten, frame_laten = self.warpframes(*latenflow, laten_frame)
+
+                # print(occlu_final[0].shape)
 
                 cost_final = self.getcost(*frame_final, *occlu_final, frame)
                 cost_pyra1 = self.getcost(*frame_pyra1, *occlu_pyra1, pyra1_frame)
                 cost_pyra2 = self.getcost(*frame_pyra2, *occlu_pyra2, pyra2_frame)
                 cost_laten = self.getcost(*frame_laten, *occlu_laten, laten_frame)
 
-                eper_final = self.epe(finalflow[1], flow)
+                eper_final = self.epe(finalflow[1].cpu().detach(), flow.cpu().detach())
 
                 loss = cost_final + cost_pyra1 + cost_pyra2 + cost_laten
 
@@ -137,7 +137,7 @@ class FlowTrainer(object):
                                      'epoch': nb_epoch,
                                      'pred_frame': fb_frame_final[0, :, 0:4, :].permute(1, 0, 2, 3),
                                      'gt_frame': frame[0, :, 0:4, :].permute(1, 0, 2, 3),
-                                     'pred_flow': flow2rgb(fb_final[0, :, 0:4, :].permute(1, 0, 2, 3)),
+                                     'pred_flow': flow2rgb(fb_final[0, :, 0:4, :].permute(1, 0, 2, 3) * torch.tensor([436./260., 1024./256.]).view(1,2,1,1).cuda()),
                                      'gt_flow': flow2rgb(flow[0, :, 0:4, :].permute(1, 0, 2, 3)),
                                      'pred_occ': fb_occlu_final[0, :, 0:4, :].permute(1, 0, 2, 3),
                                      'gt_occ': data['occlusion'][0, :, 0:4, :].permute(1, 0, 2, 3)})
@@ -151,14 +151,18 @@ class FlowTrainer(object):
             gt_flow = metrics.get('gt_flow')
             pred_occ = replicatechannel(metrics.get('pred_occ'))
             gt_occ = replicatechannel(metrics.get('gt_occ'))
-            data = torch.stack([pred_frame, gt_frame, pred_flow, gt_flow, pred_occ, gt_occ], 0)
-            grid = ToTensor()((ToPILImage()(make_grid(data, nrow=4))).resize(((436 // 4) * 6, 1024)))
-            self.writer.add_images('TRAIN/Results', grid.unsqueeze(0), metrics.get('n_batch'))
-        self.val()
 
-    def val(self):
+            data = torch.stack([pred_frame.cuda(), gt_frame.cuda(), pred_flow.cuda(), gt_flow.cuda(), pred_occ.cuda(), gt_occ.cuda()], 0)
+
+            data = data.reshape(-1,3,260,256).cpu()
+
+            grid = ToTensor()((ToPILImage()(make_grid(data, nrow=4))))
+            self.writer.add_images('TRAIN/Results', grid.unsqueeze(0), metrics.get('n_batch'))
+        self.val(metrics.get('epoch'))
+
+    def val(self, nb_epoch):
         self.model.eval()
-        if self.val_loader is None: return self.test()
+        # if self.val_loader is None: return self.test()
         # DO VAL STUFF HERE
         valstream = tqdm(self.dataloader.val())
         self.avg_loss = AverageMeter()
@@ -167,13 +171,11 @@ class FlowTrainer(object):
         with torch.no_grad():
             for i, data in enumerate(valstream):
                 frame = data['frame'].to(self.device)
-                flow = data['flow'].to(self.device)
-
+                flow = data['flow'].cpu()
                 finalflow = self.model(frame)
                 occlu_final, frame_final = self.warpframes(*finalflow, frame)
                 loss = self.getcost(*frame_final, *occlu_final, frame)
-                eper_final = self.epe(flow, finalflow[1])
-
+                eper_final = self.epe(flow.cpu().detach(), finalflow[1].cpu().detach())
                 self.avg_loss.update(loss.item(), i + 1)
                 self.avg_epe.update(eper_final.item(), i + 1)
 
@@ -187,34 +189,33 @@ class FlowTrainer(object):
         fb_final = finalflow[1]
         fb_occlu_final = occlu_final[1]
 
-        trainstream.close()
+        valstream.close()
 
         self.val_end({'VLloss': self.avg_loss.avg,
                       'epoch': nb_epoch,
                       'pred_frame': fb_frame_final[0, :, 0:4, :].permute(1, 0, 2, 3),
                       'gt_frame': frame[0, :, 0:4, :].permute(1, 0, 2, 3),
-                      'pred_flow': flow2rgb(fb_final[0, :, 0:4, :].permute(1, 0, 2, 3)),
+                      'pred_flow': flow2rgb(fb_final[0, :, 0:4, :].permute(1, 0, 2, 3) * torch.tensor([436./260., 1024./256.]).view(1,2,1,1).cuda()),
                       'gt_flow': flow2rgb(flow[0, :, 0:4, :].permute(1, 0, 2, 3)),
                       'pred_occ': fb_occlu_final[0, :, 0:4, :].permute(1, 0, 2, 3),
                       'gt_occ': data['occlusion'][0, :, 0:4, :].permute(1, 0, 2, 3)})
 
-        return self.val_end(metrics)
-
     def val_end(self, metrics):
         self.model.eval()
         with torch.no_grad():
-            pred_frame = metrics.get('pred_frame')
-            gt_frame = metrics.get('gt_frame')
-            pred_flow = metrics.get('pred_flow')
-            gt_flow = metrics.get('gt_flow')
-            pred_occ = replicatechannel(metrics.get('pred_occ'))
-            gt_occ = replicatechannel(metrics.get('gt_occ'))
-            data = torch.stack([pred_frame, gt_frame, pred_flow, gt_flow, pred_occ, gt_occ], 0)
-            grid = ToTensor()((ToPILImage()(make_grid(data, nrow=4))).resize(((436 // 4) * 6, 1024)))
-            self.writer.add_images('VAL/Results', grid, metrics.get('n_batch'))
-        self.test()
+            pred_frame = metrics.get('pred_frame').cpu()
+            gt_frame = metrics.get('gt_frame').cpu()
+            pred_flow = metrics.get('pred_flow').cpu()
+            gt_flow = metrics.get('gt_flow').cpu()
+            pred_occ = replicatechannel(metrics.get('pred_occ')).cpu()
+            gt_occ = replicatechannel(metrics.get('gt_occ')).cpu()
+            data = torch.stack([pred_frame, gt_frame, pred_flow, gt_flow, pred_occ, gt_occ], 0).cpu()
+            data = data.reshape(-1, 3, data.size(3), data.size(4)).cpu()
+            grid = make_grid(data, nrow=4)
+            self.writer.add_images('VAL/Results', grid.unsqueeze(0), metrics.get('n_batch'))
+        self.test(metrics.get('epoch'))
 
-    def test(self):
+    def test(self, nb_epoch):
         self.model.eval()
         teststream = tqdm(self.dataloader.test())
         self.avg_loss = AverageMeter()
@@ -242,21 +243,20 @@ class FlowTrainer(object):
                        'epoch': nb_epoch,
                        'pred_frame': fb_frame_final[0, :, 0:4, :].permute(1, 0, 2, 3),
                        'gt_frame': frame[0, :, 0:4, :].permute(1, 0, 2, 3),
-                       'pred_flow': flow2rgb(fb_final[0, :, 0:4, :].permute(1, 0, 2, 3)),
+                       'pred_flow': flow2rgb(fb_final[0, :, 0:4, :].permute(1, 0, 2, 3)  * torch.tensor([436./260., 1024./256.]).view(1,2,1,1).cuda()),
                        'pred_occ': fb_occlu_final[0, :, 0:4, :].permute(1, 0, 2, 3), })
-
-        return self.test_end(metrics)
 
     def test_end(self, metrics):
         self.model.eval()
         with torch.no_grad():
-            pred_frame = metrics.get('pred_frame')
-            gt_frame = metrics.get('gt_frame')
-            pred_flow = metrics.get('pred_flow')
-            pred_occ = replicatechannel(metrics.get('pred_occ'))
+            pred_frame = metrics.get('pred_frame').cpu()
+            gt_frame = metrics.get('gt_frame').cpu()
+            pred_flow = metrics.get('pred_flow').cpu()
+            pred_occ = replicatechannel(metrics.get('pred_occ')).cpu()
             data = torch.stack([pred_frame, gt_frame, pred_flow, pred_occ], 0)
-            grid = ToTensor()((ToPILImage()(make_grid(data, nrow=4))).resize((436, 1024)))
-            self.writer.add_images('Test/Results', grid, metrics.get('n_batch'))
+            data = data.reshape(-1, 3, data.size(3), data.size(4)).cpu()
+            grid = make_grid(data, nrow=4)
+            self.writer.add_images('Test/Results', grid.unsqueeze(0), metrics.get('n_batch'))
 
     def loggings(self, **metrics):
         pass
@@ -275,8 +275,7 @@ class FlowTrainer(object):
         dframe = dframe.permute(0, 2, 1, 3, 4).reshape(-1, 3, H, W)
 
         from termcolor import colored
-
-        warped = warper(dflow, dframe, scaled=scaled, nocuda=nocuda).view(B, D, 3, H, W).permute(0, 2, 1, 3, 4)
+        warped = warper(dflow.cuda(), dframe.cuda(), scaled=scaled, nocuda=nocuda).view(B, D, 3, H, W).permute(0, 2, 1, 3, 4).cuda()
         return warped
 
     def occwarper(self, ff, fb):
@@ -289,6 +288,8 @@ class FlowTrainer(object):
         ff_occ = ff_occ.view(B, D, 1, H, W).permute(0, 2, 1, 3, 4)
         fb_occ = fb_occ.view(B, D, 1, H, W).permute(0, 2, 1, 3, 4)
 
+        # print(ff_occ.shape)
+
         return ff_occ, fb_occ
 
     def log_triplet_loss(self, anchor, positive, negative, mask, q=1e-4):
@@ -300,24 +301,33 @@ class FlowTrainer(object):
 
     def getcost(self, ff_frame, fb_frame, ff_occlu, fb_occlu, frame):
 
+        ff_frame = ff_frame.cuda()
+        fb_frame = fb_frame.cuda()
+        frame = frame.cuda()
+
         ff_truth, fb_truth = frame[:, :, 1:, :], frame[:, :, :-1, :]
 
-        # ff_ploss = self.log_triplet_loss(ff_frame, ff_truth, fb_truth, 1. - ff_occlu)
-        # fb_ploss = self.log_triplet_loss(fb_frame, fb_truth, ff_truth, 1. - fb_occlu)
+        ff_ploss = self.log_triplet_loss(ff_frame, ff_truth, fb_truth, 1. - ff_occlu)
+        fb_ploss = self.log_triplet_loss(fb_frame, fb_truth, ff_truth, 1. - fb_occlu)
 
         ff_tloss = self.tripletloss(ff_frame, ff_truth, fb_truth)
         fb_tloss = self.tripletloss(fb_frame, fb_truth, ff_truth)
 
-        # total = ff_ploss + fb_ploss + ff_tloss + fb_tloss
+        total = ff_ploss + fb_ploss + ff_tloss + fb_tloss
 
-        total = ff_tloss + fb_tloss
+        # total = ff_tloss + fb_tloss
 
         return total
 
     def epe(self, source, target):
-        B, C, D, H, W = source.size()
-        diff = (source - target).permute(0, 2, 1, 3, 4).reshape(-1, C * H * W)
-        return torch.norm(diff, p=2, dim=1).mean()
+        with torch.no_grad():
+            source = source.cpu().detach() / torch.tensor([260.,256.]).view(1,2,1,1,1)
+            target = target.cpu().detach() / torch.tensor([436.,1024.]).view(1,2,1,1,1)
+            # from termcolor import colored
+            # print(colored(f'{source.shape, target.shape, source.max(), target.max()}','red'))
+            B, C, D, H, W = source.size()
+            diff = (source - target).permute(0, 2, 1, 3, 4).reshape(-1, C * H * W)
+            return torch.norm(diff, p=2, dim=1).mean()
 
     def run(self):
         self.initialize()
