@@ -4,7 +4,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 from torch.nn import functional as F
 import torch
-
+import os
 #EXTRA LIBS
 from tqdm import tqdm
 
@@ -14,6 +14,13 @@ from models.Pyramid3dnet import PyramidUNet
 from utils import (warper, AverageMeter, flow2rgb, replicatechannel,computeocclusion, ResizeImage)
 from torchvision.transforms import (ToTensor, ToPILImage)
 
+
+from os import environ as env
+GPUS = env["CUDA_VISIBLE_DEVICES"]
+GPUS_LIST = list(range(len(GPUS.split(','))))
+
+print(GPUS_LIST)
+
 class FlowTrainer(object):
     def __init__(self):
         super(FlowTrainer, self).__init__()
@@ -22,7 +29,7 @@ class FlowTrainer(object):
 
         self.epoch = 1000
         self.dataloader = SintelLoader3D()
-        self.gpu_ids = [0, 1,2]
+        self.gpu_ids = GPUS_LIST
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.01)
         self.scheduler = CosineAnnealingLR(self.optimizer, len(self.dataloader.train()))
@@ -31,25 +38,23 @@ class FlowTrainer(object):
         self.writer = SummaryWriter()
         self.global_step = 0
         self.tripletloss = torch.nn.TripletMarginLoss()
-        self.load_model_path = False
+        self.load_model_path = "./archive/best.pth"
+        self.stat_cache = None
 
     def initialize(self):
         self.model.to(self.device)
         self.model = torch.nn.DataParallel(self.model, device_ids=self.gpu_ids)
         if self.load_model_path:
             # LOAD MODEL WEIGHTS HERE
-            pass
+            if os.path.exists(self.load_model_path):
+                self.load_old_best()
         self.initialized = True
 
-    def savemodel(self, metrics, compare='val_loss'):
-        # Save model in save_model_path
-        if self.best_metrics.get('val_loss') > metrics.get('val_loss'):
-            # save only if new metrics are low
-            self.best_metrics.update(metrics)
-            pass
-        else:
-            # Load from the best saved
-            pass
+    def savemodel(self, metrics):
+        import json
+        with open('./archive/metrics.txt','w') as f:
+            json.dump(metrics,f)
+        torch.save(self.model.module.state_dict(), self.load_model_path)
 
     def warpframes(self, ff, fb, frame):
         ff_ = self.warper(ff, frame, 'ff')
@@ -133,12 +138,26 @@ class FlowTrainer(object):
         fb_final = finalflow[1]
         fb_occlu_final = occlu_final[1]
 
+        self.writer.add_histogram('REAL/flow_u', flow[0,0,:].view(-1), nb_epoch)
+        self.writer.add_histogram('REAL/flow_v', flow[0,1,:].view(-1), nb_epoch)
+
+        self.writer.add_histogram('PRED/flow_u_ff', finalflow[0][0,0,:].view(-1), nb_epoch)
+        self.writer.add_histogram('PRED/flow_v_ff', finalflow[0][0,1,:].view(-1), nb_epoch)
+
+        self.writer.add_histogram('PRED/flow_u_fb', finalflow[1][0,0,:].view(-1), nb_epoch)
+        self.writer.add_histogram('PRED/flow_v_fb', finalflow[1][0,1,:].view(-1), nb_epoch)
+
+        self.writer.add_histogram('REAL/occ',data['occlusion'][0,:].view(-1),nb_epoch)
+
+        self.writer.add_histogram('PRED/occ_fb',occlu_final[0][0,:].view(-1),nb_epoch)
+        self.writer.add_histogram('PRED/occ_fb',occlu_final[1][0,:].view(-1),nb_epoch)
+
         return self.train_epoch_end({'TRloss': self.avg_loss.avg,
                                      'epoch': nb_epoch,
                                      'pred_frame': fb_frame_final[0, :, 0:4, :].permute(1, 0, 2, 3),
                                      'gt_frame': frame[0, :, 0:4, :].permute(1, 0, 2, 3),
-                                     'pred_flow': flow2rgb(fb_final[0, :, 0:4, :].permute(1, 0, 2, 3) * torch.tensor([436./260., 1024./256.]).view(1,2,1,1).cuda()),
-                                     'gt_flow': flow2rgb(flow[0, :, 0:4, :].permute(1, 0, 2, 3)),
+                                     'pred_flow': flow2rgb(fb_final[0, :, 0:4, :].permute(1, 0, 2, 3), False),
+                                     'gt_flow': flow2rgb(flow[0, :, 0:4, :].permute(1, 0, 2, 3),False),
                                      'pred_occ': fb_occlu_final[0, :, 0:4, :].permute(1, 0, 2, 3),
                                      'gt_occ': data['occlusion'][0, :, 0:4, :].permute(1, 0, 2, 3)})
 
@@ -192,15 +211,30 @@ class FlowTrainer(object):
         valstream.close()
 
         self.val_end({'VLloss': self.avg_loss.avg,
+                      'VLepe':self.avg_epe.avg,
                       'epoch': nb_epoch,
                       'pred_frame': fb_frame_final[0, :, 0:4, :].permute(1, 0, 2, 3),
                       'gt_frame': frame[0, :, 0:4, :].permute(1, 0, 2, 3),
-                      'pred_flow': flow2rgb(fb_final[0, :, 0:4, :].permute(1, 0, 2, 3) * torch.tensor([436./260., 1024./256.]).view(1,2,1,1).cuda()),
-                      'gt_flow': flow2rgb(flow[0, :, 0:4, :].permute(1, 0, 2, 3)),
+                      'pred_flow': flow2rgb(fb_final[0, :, 0:4, :].permute(1, 0, 2, 3), False),
+                      'gt_flow': flow2rgb(flow[0, :, 0:4, :].permute(1, 0, 2, 3),False),
                       'pred_occ': fb_occlu_final[0, :, 0:4, :].permute(1, 0, 2, 3),
                       'gt_occ': data['occlusion'][0, :, 0:4, :].permute(1, 0, 2, 3)})
 
     def val_end(self, metrics):
+        """WRITE STAT FIRST"""
+        if self.stat_cache is None:
+            self.stat_cache = {'VLloss': metrics.get('VLloss'),
+                            'VLepe': metrics.get('VLepe')}
+            self.savemodel({'VLloss': metrics.get('VLloss'),
+                            'VLepe': metrics.get('VLepe')})
+        else:
+            if self.stat_cache.get('VLloss') < metrics.get('VLloss'):
+                self.stat_cache.update({'VLloss': metrics.get('VLloss'),
+                                'VLepe': metrics.get('VLepe')})
+                self.savemodel(self.stat_cache)
+            else:
+                self.load_old_best()
+
         self.model.eval()
         with torch.no_grad():
             pred_frame = metrics.get('pred_frame').cpu()
@@ -213,7 +247,13 @@ class FlowTrainer(object):
             data = data.reshape(-1, 3, data.size(3), data.size(4)).cpu()
             grid = make_grid(data, nrow=4)
             self.writer.add_images('VAL/Results', grid.unsqueeze(0), metrics.get('n_batch'))
-        self.test(metrics.get('epoch'))
+        # self.test(metrics.get('epoch'))
+
+    def load_old_best(self):
+        import json
+        with open('./archive/metrics.txt', 'r') as f:
+            self.stat_cache = json.load(f)
+        self.model.module.load_state_dict(torch.load(self.load_model_path))
 
     def test(self, nb_epoch):
         self.model.eval()
@@ -243,7 +283,7 @@ class FlowTrainer(object):
                        'epoch': nb_epoch,
                        'pred_frame': fb_frame_final[0, :, 0:4, :].permute(1, 0, 2, 3),
                        'gt_frame': frame[0, :, 0:4, :].permute(1, 0, 2, 3),
-                       'pred_flow': flow2rgb(fb_final[0, :, 0:4, :].permute(1, 0, 2, 3)  * torch.tensor([436./260., 1024./256.]).view(1,2,1,1).cuda()),
+                       'pred_flow': flow2rgb(fb_final[0, :, 0:4, :].permute(1, 0, 2, 3),False),
                        'pred_occ': fb_occlu_final[0, :, 0:4, :].permute(1, 0, 2, 3), })
 
     def test_end(self, metrics):
@@ -272,10 +312,12 @@ class FlowTrainer(object):
         else:
             raise Exception("Mode must be flow-forwad 'ff' or flow-backward 'fb'")
 
-        dframe = dframe.permute(0, 2, 1, 3, 4).reshape(-1, 3, H, W)
+        _, _, _, H_, W_ = dframe.size()
+
+        dframe = dframe.permute(0, 2, 1, 3, 4).reshape(-1, 3, H_, W_)
 
         from termcolor import colored
-        warped = warper(dflow.cuda(), dframe.cuda(), scaled=scaled, nocuda=nocuda).view(B, D, 3, H, W).permute(0, 2, 1, 3, 4).cuda()
+        warped = warper(dflow.cuda(), dframe.cuda(), scaled=False, nocuda=nocuda).view(B, D, 3, H, W).permute(0, 2, 1, 3, 4).cuda()
         return warped
 
     def occwarper(self, ff, fb):
@@ -294,7 +336,7 @@ class FlowTrainer(object):
 
     def log_triplet_loss(self, anchor, positive, negative, mask, q=1e-4):
         pos = torch.mul(torch.pow((torch.abs(anchor - positive) + 1e-2), q), mask)
-        neg = torch.mul(torch.pow((torch.abs(anchor - positive) + 1e-2), q), mask)
+        neg = torch.mul(torch.pow((torch.abs(anchor - negative) + 1e-2), q), mask)
         loss = torch.log(torch.exp(pos / (neg + 1e-10)))
         loss = loss.sum() / (mask.sum() + 1e-10)
         return loss
@@ -307,11 +349,11 @@ class FlowTrainer(object):
 
         ff_truth, fb_truth = frame[:, :, 1:, :], frame[:, :, :-1, :]
 
-        ff_ploss = self.log_triplet_loss(ff_frame, ff_truth, fb_truth, 1. - ff_occlu)
-        fb_ploss = self.log_triplet_loss(fb_frame, fb_truth, ff_truth, 1. - fb_occlu)
+        ff_ploss = self.log_triplet_loss(ff_truth, ff_frame, fb_frame, 1. - ff_occlu)
+        fb_ploss = self.log_triplet_loss(fb_truth, fb_frame, ff_frame, 1. - fb_occlu)
 
-        ff_tloss = self.tripletloss(ff_frame, ff_truth, fb_truth)
-        fb_tloss = self.tripletloss(fb_frame, fb_truth, ff_truth)
+        ff_tloss = self.tripletloss(ff_truth, ff_frame, fb_frame)
+        fb_tloss = self.tripletloss(ff_truth, ff_frame, fb_frame)
 
         total = ff_ploss + fb_ploss + ff_tloss + fb_tloss
 
@@ -322,7 +364,7 @@ class FlowTrainer(object):
     def epe(self, source, target):
         with torch.no_grad():
             source = source.cpu().detach() / torch.tensor([260.,256.]).view(1,2,1,1,1)
-            target = target.cpu().detach() / torch.tensor([436.,1024.]).view(1,2,1,1,1)
+            target = target.cpu().detach() / torch.tensor([260.,256.]).view(1,2,1,1,1)
             # from termcolor import colored
             # print(colored(f'{source.shape, target.shape, source.max(), target.max()}','red'))
             B, C, D, H, W = source.size()

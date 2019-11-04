@@ -53,9 +53,9 @@ def warper(flow, img, scaled=True,nocuda = False):
     b, h, w, c = flow.size()
     if not scaled:
         if nocuda:
-            flow = flow / torch.tensor([h, w])
+            flow = flow / torch.tensor([436, 1024])
         else:
-            flow = flow / torch.tensor([h, w]).cuda()
+            flow = flow / torch.tensor([436, 1024]).cuda()
 
 
     meshgrid = torch.cat([torch.linspace(-1.0, 1.0, w).view(1, 1, w, 1).expand(b, h, w, 1),
@@ -77,7 +77,7 @@ def replicatechannel(x):
     :rtype: an image with replicated first channel
     """
 
-    
+
 
     return x.view(1, -1).repeat(3, 1).view(3, x.size(0), x.size(2), x.size(3)).permute(1, 0, 2, 3)
 

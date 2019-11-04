@@ -35,7 +35,7 @@ class OutputUpsampler(nn.Module):
             nn.ReLU(inplace=True),
             nn.BatchNorm3d(mid_channels),
             nn.Conv3d(in_channels=mid_channels, out_channels=out_channels, kernel_size=(2, 3, 3), padding=(0, 1, 1)),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
 
     def forward(self, x):
@@ -47,7 +47,7 @@ class FlowPrediction(nn.Module):
         super(FlowPrediction, self).__init__()
         self.predict = nn.Sequential(
             nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=(2, 3, 3), padding=(0, 1, 1)),
-            nn.Sigmoid())
+            nn.Sigmoid(),)
 
     def forward(self, x):
         return self.predict(x)
@@ -85,11 +85,10 @@ class Upsampler(nn.Module):
         self.seq = nn.Sequential(
             nn.ConvTranspose3d(in_channels=in_channels, out_channels=mid_channels, kernel_size=3, stride=(1, 2, 2),
                                padding=1, output_padding=(0, 1, 1)),
-            nn.LeakyReLU(),
+            nn.ReLU(),
             nn.BatchNorm3d(mid_channels),
             nn.Conv3d(in_channels=mid_channels, out_channels=out_channels, kernel_size=3, padding=1),
             nn.LeakyReLU(),
-            nn.BatchNorm3d(out_channels),
         )
 
     def forward(self, x, bypass):
@@ -119,7 +118,6 @@ class Latent(nn.Module):
             nn.BatchNorm3d(mid_channels),
             nn.Conv3d(kernel_size=3, in_channels=mid_channels, out_channels=out_channels, padding=1),
             nn.LeakyReLU(),
-            nn.BatchNorm3d(out_channels),
         )
 
     def forward(self, x):
@@ -194,22 +192,30 @@ class PyramidUNet(nn.Module):
         pyramid_1 = self.upsample_1(pyramid_2, bypass_1)
         pyramid_0 = self.upsample_0(pyramid_1, bypass_0)
 
+        scaler = torch.tensor([260,256]).view(1,2,1,1,1).cuda()
 
-        finalflow_b = self.finalflow_f(pyramid_0)
-        finalflow_f = self.finalflow_f(pyramid_0)
+        finalflow_b = self.finalflow_f(pyramid_0) * scaler
+
+        finalflow_f = self.finalflow_f(pyramid_0) * scaler
+
         finalflow = (finalflow_f, finalflow_b)
 
         if self.training:
             latentflow_f = self.latentflow_f(latentout)
+            latentflow_f = latentflow_f * scaler
 
             latentflow_b = self.latentflow_b(latentout)
+            latentflow_b = latentflow_b * scaler
 
             pyramidflow_1f = self.pyramidflow_1f(pyramid_1)
+            pyramidflow_1f = pyramidflow_1f * scaler
             pyramidflow_1b = self.pyramidflow_1b(pyramid_1)
+            pyramidflow_1b = pyramidflow_1b * scaler
 
             pyramidflow_2f = self.pyramidflow_2f(pyramid_2)
+            pyramidflow_2f = pyramidflow_2f * scaler
             pyramidflow_2b = self.pyramidflow_2b(pyramid_2)
-
+            pyramidflow_2b = pyramidflow_2b * scaler
 
             latentflow = (latentflow_f, latentflow_b)
             pyramidflow_2 = (pyramidflow_2f, pyramidflow_2b)

@@ -47,36 +47,25 @@ class SintelDataset3D(Dataset):
         WE ARE GOING TO USE RANDOM CROP TECHNIQUES
         """
         t0 = transforms.Compose([ToTensor()])
-        t1 = transforms.Compose([Resize((64, 64)), ToTensor()])
-        t2 = transforms.Compose([Resize((32, 32)), ToTensor()])
-        t3 = transforms.Compose([Resize((16, 16)), ToTensor()])
-
         images = [*map(lambda x:Image.open(x),paths)]
-
         R = lambda x, t: t(x).unsqueeze(1)[:,:,hs:he, ws:we]
-
-        C = lambda x:ToPILImage()((ToTensor()(x))[:,hs:he, ws:we])
-
-        final_frame = torch.cat([*map(lambda img: R(img, t0),images)], 1)
-
+        frames = [*map(lambda img: R(img, t0),images)]
+        final_frame = torch.cat(frames, 1)
         if not self.is_test:
 
             f1 = []
             f2 = []
             f3 = []
 
-            for img in images:
-                tenim = ToTensor()(img)
-                tenim = tenim[:,hs:he, ws:we]
-                tenim = ToPILImage()(tenim)
-                f1im = ToTensor()(tenim.resize((64,64)))
-                f2im = ToTensor()(tenim.resize((32,32)))
-                f3im = ToTensor()(tenim.resize((16,16)))
+            for img in frames:
+                tenim  = ToPILImage()(img[:,0,:])
+                f1im = ToTensor()(tenim.resize((64, 64)))
+                f2im = ToTensor()(tenim.resize((32, 32)))
+                f3im = ToTensor()(tenim.resize((16, 16)))
 
                 f1.append(f1im.unsqueeze(1))
                 f2.append(f2im.unsqueeze(1))
                 f3.append(f3im.unsqueeze(1))
-
 
             pyra1_frame = torch.cat(f1, 1)
             pyra2_frame = torch.cat(f2, 1)
@@ -138,19 +127,23 @@ class SintelDataset3D(Dataset):
 
 class SintelLoader3D(object):
     def __init__(self, train_path="/data/keshav/sintel/training/final", test_path="/data/keshav/sintel/test/final",
-                 batch_sizes=(5, 1, 1), num_workers=8):
+                 batch_sizes=(10, 1, 1), num_workers=8):
         self.trainset, self.valset, self.testset = get_train_val_test_list(train_path, test_path)
 
         self.batch_sizes = batch_sizes
         self.num_workers = num_workers
+        self.load_all()
+
+    def load_all(self):
+
+        random.shuffle(self.trainset)
+        random.shuffle(self.valset)
+        random.shuffle(self.testset)
 
         self.__train = SintelDataset3D(dataset=self.trainset)
         self.__val = SintelDataset3D(dataset=self.valset)
         self.__test = SintelDataset3D(dataset=self.testset, is_test=True)
 
-        self.load_all()
-
-    def load_all(self):
         self.trainloader = DataLoader(self.__train, batch_size=self.batch_sizes[0], num_workers=self.num_workers,
                                       pin_memory=True,)
         self.valloader = DataLoader(self.__val, batch_size=self.batch_sizes[1], num_workers=self.num_workers,
@@ -160,13 +153,17 @@ class SintelLoader3D(object):
                                      pin_memory=True)
 
     def train(self):
+        self.load_all()
         return self.trainloader
 
     def val(self):
+        self.load_all()
         return self.valloader
 
     def test(self):
+        self.load_all()
         return self.testloader
 
     def train_val_test(self):
+        self.load_all()
         return self.trainloader, self.valloader, self.testloader
