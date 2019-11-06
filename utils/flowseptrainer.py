@@ -9,8 +9,8 @@ import os
 from tqdm import tqdm
 
 #LOCAL IMPORTS
-from dataloader.sintelloader3dlarge import SintelLoader3D
-from models.Pyramid3dnet import PyramidUNet
+from dataloader.sintelloader import SintelLoader
+from models.SeparableFPN import PyramidUNet
 from utils import (warper, AverageMeter, flow2rgb, replicatechannel,computeocclusion, ResizeImage)
 from torchvision.transforms import (ToTensor, ToPILImage)
 
@@ -20,7 +20,7 @@ GPUS = env["CUDA_VISIBLE_DEVICES"]
 GPUS_LIST = list(range(len(GPUS.split(','))))
 
 print(GPUS_LIST)
-
+#
 class FlowTrainer(object):
     def __init__(self):
         super(FlowTrainer, self).__init__()
@@ -28,7 +28,7 @@ class FlowTrainer(object):
         self.model = PyramidUNet()
 
         self.epoch = 1000
-        self.dataloader = SintelLoader3D()
+        self.dataloader = SintelLoader()
         self.gpu_ids = GPUS_LIST
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.01)
@@ -94,7 +94,6 @@ class FlowTrainer(object):
             # pyra2_frame.requires_grad = True
             laten_frame = data['laten_frame'].to(self.device)
             # laten_frame.requires_grad = True
-
             self.optimizer.zero_grad()
             # forward
             with torch.set_grad_enabled(True):
@@ -138,28 +137,28 @@ class FlowTrainer(object):
         fb_final = finalflow[1]
         fb_occlu_final = occlu_final[1]
 
-        self.writer.add_histogram('REAL/flow_u', flow[0,0,:].view(-1), nb_epoch)
-        self.writer.add_histogram('REAL/flow_v', flow[0,1,:].view(-1), nb_epoch)
+        self.writer.add_histogram('REAL/flow_u', flow[0,0].view(-1), nb_epoch)
+        self.writer.add_histogram('REAL/flow_v', flow[0,1].view(-1), nb_epoch)
 
-        self.writer.add_histogram('PRED/flow_u_ff', finalflow[0][0,0,:].view(-1), nb_epoch)
-        self.writer.add_histogram('PRED/flow_v_ff', finalflow[0][0,1,:].view(-1), nb_epoch)
+        self.writer.add_histogram('PRED/flow_u_ff', finalflow[0][0,0].view(-1), nb_epoch)
+        self.writer.add_histogram('PRED/flow_v_ff', finalflow[0][0,1].view(-1), nb_epoch)
 
-        self.writer.add_histogram('PRED/flow_u_fb', finalflow[1][0,0,:].view(-1), nb_epoch)
-        self.writer.add_histogram('PRED/flow_v_fb', finalflow[1][0,1,:].view(-1), nb_epoch)
+        self.writer.add_histogram('PRED/flow_u_fb', finalflow[1][0,0].view(-1), nb_epoch)
+        self.writer.add_histogram('PRED/flow_v_fb', finalflow[1][0,1].view(-1), nb_epoch)
 
-        self.writer.add_histogram('REAL/occ',data['occlusion'][0,:].view(-1),nb_epoch)
+        self.writer.add_histogram('REAL/occ',data['occlusion'][0].view(-1),nb_epoch)
 
-        self.writer.add_histogram('PRED/occ_fb',occlu_final[0][0,:].view(-1),nb_epoch)
-        self.writer.add_histogram('PRED/occ_fb',occlu_final[1][0,:].view(-1),nb_epoch)
+        self.writer.add_histogram('PRED/occ_ff',occlu_final[0][0].view(-1),nb_epoch)
+        self.writer.add_histogram('PRED/occ_fb',occlu_final[1][0].view(-1),nb_epoch)
 
         return self.train_epoch_end({'TRloss': self.avg_loss.avg,
                                      'epoch': nb_epoch,
-                                     'pred_frame': fb_frame_final[0, :, 0:2, :].permute(1, 0, 2, 3),
-                                     'gt_frame': frame[0, :, 0:2, :].permute(1, 0, 2, 3),
-                                     'pred_flow': flow2rgb(fb_final[0, :, 0:2, :].permute(1, 0, 2, 3), False),
-                                     'gt_flow': flow2rgb(flow[0, :, 0:2, :].permute(1, 0, 2, 3),False),
-                                     'pred_occ': fb_occlu_final[0, :, 0:2, :].permute(1, 0, 2, 3),
-                                     'gt_occ': data['occlusion'][0, :, 0:2, :].permute(1, 0, 2, 3)})
+                                     'pred_frame': fb_frame_final[0:4],
+                                     'gt_frame': frame[0:4,:3],
+                                     'pred_flow': flow2rgb(fb_final[0:4], False),
+                                     'gt_flow': flow2rgb(flow[0:4],False),
+                                     'pred_occ': fb_occlu_final[0:4],
+                                     'gt_occ': data['occlusion'][0:4]})
 
     def train_epoch_end(self, metrics):
         self.model.eval()
@@ -171,11 +170,12 @@ class FlowTrainer(object):
             pred_occ = replicatechannel(metrics.get('pred_occ'))
             gt_occ = replicatechannel(metrics.get('gt_occ'))
 
-            data = torch.stack([pred_frame.cuda(), gt_frame.cuda(), pred_flow.cuda(), gt_flow.cuda(), pred_occ.cuda(), gt_occ.cuda()], 0)
+            data = torch.cat([pred_frame.cuda(), gt_frame.cuda(), pred_flow.cuda(), gt_flow.cuda(), pred_occ.cuda(), gt_occ.cuda()],0)
 
-            data = data.reshape(-1,3,data.size(3), data.size(4)).cpu()
+            data = data.cpu()
 
-            grid = ToTensor()((ToPILImage()(make_grid(data, nrow=2))))
+            grid = make_grid(data, nrow=4)
+            grid = ToTensor()((ToPILImage()(grid)).resize((4106//6,2630//4)))
             self.writer.add_images('TRAIN/Results', grid.unsqueeze(0), metrics.get('n_batch'))
         self.val(metrics.get('epoch'))
 
@@ -213,12 +213,12 @@ class FlowTrainer(object):
         self.val_end({'VLloss': self.avg_loss.avg,
                       'VLepe':self.avg_epe.avg,
                       'epoch': nb_epoch,
-                      'pred_frame': fb_frame_final[0, :, 0:2, :].permute(1, 0, 2, 3),
-                      'gt_frame': frame[0, :, 0:2, :].permute(1, 0, 2, 3),
-                      'pred_flow': flow2rgb(fb_final[0, :, 0:2, :].permute(1, 0, 2, 3), False),
-                      'gt_flow': flow2rgb(flow[0, :, 0:2, :].permute(1, 0, 2, 3),False),
-                      'pred_occ': fb_occlu_final[0, :, 0:2, :].permute(1, 0, 2, 3),
-                      'gt_occ': data['occlusion'][0, :, 0:2, :].permute(1, 0, 2, 3)})
+                      'pred_frame': fb_frame_final[0:4],
+                      'gt_frame': frame[0:4,:3],
+                      'pred_flow': flow2rgb(fb_final[0:4], False),
+                      'gt_flow': flow2rgb(flow[0:4],False),
+                      'pred_occ': fb_occlu_final[0:4],
+                      'gt_occ': data['occlusion'][0:4]})
 
     def val_end(self, metrics):
         """WRITE STAT FIRST"""
@@ -243,11 +243,11 @@ class FlowTrainer(object):
             gt_flow = metrics.get('gt_flow').cpu()
             pred_occ = replicatechannel(metrics.get('pred_occ')).cpu()
             gt_occ = replicatechannel(metrics.get('gt_occ')).cpu()
-            data = torch.stack([pred_frame, gt_frame, pred_flow, gt_flow, pred_occ, gt_occ], 0).cpu()
-            data = data.reshape(-1, 3, data.size(3), data.size(4)).cpu()
-            grid = make_grid(data, nrow=2)
+            data = torch.cat([pred_frame, gt_frame, pred_flow, gt_flow, pred_occ, gt_occ], 0).cpu()
+            grid = make_grid(data, nrow=4)
+            grid = ToTensor()((ToPILImage()(grid)).resize((4106 // 6, 2630 // 4)))
             self.writer.add_images('VAL/Results', grid.unsqueeze(0), metrics.get('n_batch'))
-        self.test(metrics.get('epoch'))
+        # self.test(metrics.get('epoch'))
 
     def load_old_best(self):
         import json
@@ -295,43 +295,24 @@ class FlowTrainer(object):
             pred_occ = replicatechannel(metrics.get('pred_occ')).cpu()
             data = torch.stack([pred_frame, gt_frame, pred_flow, pred_occ], 0)
             data = data.reshape(-1, 3, data.size(3), data.size(4)).cpu()
-            grid = make_grid(data, nrow=2)
+            grid = make_grid(data, nrow=4)
             self.writer.add_images('Test/Results', grid.unsqueeze(0), metrics.get('n_batch'))
 
     def loggings(self, **metrics):
         pass
 
     def warper(self, flows, frames, mode='ff', scaled=True, nocuda=False):
-        B, _, D, H, W = flows.size()
-        dflow = flows.permute(0, 2, 1, 3, 4).reshape(-1, 2, H, W)
-
         if mode == 'ff':
-            dframe = frames[:, :, :-1, :]  # given frame from 0 to n-1 predict frame 1 to n
+            dframe = frames[:,:3]  # given frame from 0 to n-1 predict frame 1 to n
         elif mode == 'fb':
-            dframe = frames[:, :, 1:, :]  # given frame from 1 to n predict frame 0 to n-1
+            dframe = frames[:, 3:]  # given frame from 1 to n predict frame 0 to n-1
         else:
             raise Exception("Mode must be flow-forwad 'ff' or flow-backward 'fb'")
-
-        _, _, _, H_, W_ = dframe.size()
-
-        dframe = dframe.permute(0, 2, 1, 3, 4).reshape(-1, 3, H_, W_)
-
-        from termcolor import colored
-        warped = warper(dflow.cuda(), dframe.cuda(), scaled=False, nocuda=nocuda).view(B, D, 3, H, W).permute(0, 2, 1, 3, 4).cuda()
+        warped = warper(flows.cuda(), dframe.cuda(), scaled=True, nocuda=nocuda).cuda()
         return warped
 
     def occwarper(self, ff, fb):
-        B, C, D, H, W = ff.size()
-        dff = ff.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
-        dfb = fb.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
-
-        ff_occ, fb_occ = computeocclusion(dff, dfb)
-
-        ff_occ = ff_occ.view(B, D, 1, H, W).permute(0, 2, 1, 3, 4)
-        fb_occ = fb_occ.view(B, D, 1, H, W).permute(0, 2, 1, 3, 4)
-
-        # print(ff_occ.shape)
-
+        ff_occ, fb_occ = computeocclusion(ff, fb)
         return ff_occ, fb_occ
 
     def log_triplet_loss(self, anchor, positive, negative, mask, q=1e-4):
@@ -347,10 +328,10 @@ class FlowTrainer(object):
         fb_frame = fb_frame.cuda()
         frame = frame.cuda()
 
-        ff_truth, fb_truth = frame[:, :, 1:, :], frame[:, :, :-1, :]
+        ff_truth, fb_truth = frame[ :, 3:], frame[:, :3]
 
-        ff_ploss = self.log_triplet_loss(ff_truth, ff_frame, fb_frame, 1. - ff_occlu)
-        fb_ploss = self.log_triplet_loss(fb_truth, fb_frame, ff_frame, 1. - fb_occlu)
+        ff_ploss = self.log_triplet_loss(ff_truth, ff_frame, fb_frame, ff_occlu)
+        fb_ploss = self.log_triplet_loss(fb_truth, fb_frame, ff_frame, fb_occlu)
 
         ff_tloss = self.tripletloss(ff_truth, ff_frame, fb_frame)
         fb_tloss = self.tripletloss(ff_truth, ff_frame, fb_frame)
@@ -367,8 +348,8 @@ class FlowTrainer(object):
             target = target.cpu().detach()
             # from termcolor import colored
             # print(colored(f'{source.shape, target.shape, source.max(), target.max()}','red'))
-            B, C, D, H, W = source.size()
-            diff = (source - target).permute(0, 2, 1, 3, 4).reshape(-1, C * H * W)
+            B, C, H, W = source.size()
+            diff = (source - target).reshape(-1, C * H * W)
             return torch.norm(diff, p=2, dim=1).mean()
 
     def run(self):
