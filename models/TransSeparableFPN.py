@@ -6,35 +6,37 @@ import torch
 
 import torch.nn as nn
 
+# class DConv2d(nn.Module):
+#     def __init__(self, in_channels=3, out_channels=32, dilation=1, kernel_size=3, padding=1, stride=1, bias=True):
+#         super(DConv2d, self).__init__()
+#         kernels_per_layer = in_channels // out_channels if in_channels > out_channels else out_channels // in_channels
+#         self.depthwise = nn.Conv2d(in_channels, in_channels * kernels_per_layer, kernel_size=kernel_size,
+#                                    padding=padding, groups=2, dilation=dilation, stride=stride, bias=bias)
+#         self.pointwise = nn.Conv2d(in_channels * kernels_per_layer, out_channels, kernel_size=1)
 
-class DConv2d(nn.Module):
-    def __init__(self, in_channels=3, out_channels=32, dilation=1, kernel_size=3, padding=1, stride=1, bias=True):
-        super(DConv2d, self).__init__()
-        kernels_per_layer = in_channels // out_channels if in_channels > out_channels else out_channels // in_channels
-        self.depthwise = nn.Conv2d(in_channels, in_channels * kernels_per_layer, kernel_size=kernel_size,
-                                   padding=padding, groups=2, dilation=dilation, stride=stride, bias=bias)
-        self.pointwise = nn.Conv2d(in_channels * kernels_per_layer, out_channels, kernel_size=1)
-
-    def forward(self, x):
-        out = self.depthwise(x)
-        out = self.pointwise(out)
-        return out
+#     def forward(self, x):
+#         out = self.depthwise(x)
+#         out = self.pointwise(out)
+#         return out
 
 
-class DConvTranspose2d(nn.Module):
-    def __init__(self, in_channels=16, out_channels=32, dilation=1, kernel_size=3, padding=1, stride=1, bias=True,
-                 output_padding=(0, 0)):
-        super(DConvTranspose2d, self).__init__()
-        kernels_per_layer = in_channels // out_channels if in_channels > out_channels else out_channels // in_channels
-        self.depthwise = nn.ConvTranspose2d(in_channels, in_channels * kernels_per_layer, kernel_size=kernel_size,
-                                            padding=padding, groups=2,
-                                            stride=stride, dilation=dilation, bias=bias, output_padding=output_padding)
-        self.pointwise = nn.ConvTranspose2d(in_channels * kernels_per_layer, out_channels, kernel_size=1)
+# class DConvTranspose2d(nn.Module):
+#     def __init__(self, in_channels=16, out_channels=32, dilation=1, kernel_size=3, padding=1, stride=1, bias=True,
+#                  output_padding=(0, 0)):
+#         super(DConvTranspose2d, self).__init__()
+#         kernels_per_layer = in_channels // out_channels if in_channels > out_channels else out_channels // in_channels
+#         self.depthwise = nn.ConvTranspose2d(in_channels, in_channels * kernels_per_layer, kernel_size=kernel_size,
+#                                             padding=padding, groups=2,
+#                                             stride=stride, dilation=dilation, bias=bias, output_padding=output_padding)
+#         self.pointwise = nn.ConvTranspose2d(in_channels * kernels_per_layer, out_channels, kernel_size=1)
 
-    def forward(self, x):
-        out = self.depthwise(x)
-        out = self.pointwise(out)
-        return out
+#     def forward(self, x):
+#         out = self.depthwise(x)
+#         out = self.pointwise(out)
+#         return out
+
+from torch.nn import Conv2d as DConv2d
+from torch.nn import ConvTranspose2d as DConvTranspose2d
 
 
 class InputDownsampler(nn.Module):
@@ -44,7 +46,7 @@ class InputDownsampler(nn.Module):
             DConv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=(5, 5), stride=1,
                     padding=(1, 2)),
             nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU(inplace = True),
+            nn.ReLU(),
             nn.MaxPool2d(kernel_size=3, stride=(2, 2), padding=(0, 1)),
 
         )
@@ -62,17 +64,19 @@ class OutputUpsampler(nn.Module):
             DConvTranspose2d(in_channels=in_channels, out_channels=mid_channels, kernel_size=(5, 3), stride=1,
                              padding=(1, 1), output_padding=(0, 0)),
             nn.BatchNorm2d(mid_channels),
-            nn.LeakyReLU(inplace = True),
+            nn.ReLU(),
+            # nn.Dropout(0.5),
             DConvTranspose2d(in_channels=mid_channels, out_channels=mid_channels, kernel_size=(5, 5),
                              stride=(2, 2),
                              padding=2, output_padding=1),
 
             nn.BatchNorm2d(mid_channels),
-            nn.LeakyReLU(inplace = True),
+            nn.ReLU(),
             nn.Conv2d(in_channels=mid_channels, out_channels=out_channels, kernel_size=(3, 3), padding=(1, 1)),
             nn.BatchNorm2d(out_channels, eps=1e-1, momentum=1e-5),
-            # nn.LeakyReLU(inplace = True),
-            # nn.LeakyReLU(inplace = True),
+            nn.Tanh(),
+            # nn.ReLU(inplace = True),
+            # nn.ReLU(inplace = True),
         )
 
     def forward(self, x):
@@ -84,8 +88,10 @@ class FlowPrediction(nn.Module):
         super(FlowPrediction, self).__init__()
         self.predict = nn.Sequential(
             nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=(3, 3), padding=(1, 1)),
-            nn.BatchNorm2d(out_channels,eps=1e-01, momentum=1e-5),
-            # nn.LeakyReLU(inplace = True),
+            nn.BatchNorm2d(out_channels, eps=1e-01, momentum=1e-5),
+            # nn.ReLU(),
+            nn.Tanh(),
+            # nn.ReLU(inplace = True),
         )
 
     def forward(self, x):
@@ -100,10 +106,11 @@ class Downsampler(nn.Module):
         self.seq = nn.Sequential(
             DConv2d(kernel_size=3, in_channels=in_channels, out_channels=mid_channels, padding=1),
             nn.BatchNorm2d(mid_channels),  # added batchnorm
-            nn.LeakyReLU(inplace = True),
+            nn.ReLU(),
             DConv2d(kernel_size=3, in_channels=mid_channels, out_channels=out_channels, padding=1),
             nn.BatchNorm2d(out_channels),  # added batchnorm
-            nn.LeakyReLU(inplace = True),
+            # nn.ReLU(inplace=True),
+            nn.ReLU(),
 
         )
 
@@ -126,14 +133,13 @@ class Upsampler(nn.Module):
             DConvTranspose2d(in_channels=in_channels, out_channels=mid_channels, kernel_size=3, stride=(2, 2),
                              padding=1, output_padding=(1, 1)),
 
-            nn.BatchNorm2d(mid_channels),# added batchnorm
-            nn.LeakyReLU(inplace = True),
+            nn.BatchNorm2d(mid_channels),  # added batchnorm
+            nn.ReLU(),
             DConv2d(in_channels=mid_channels, out_channels=out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),  # added batchnorm
-            nn.LeakyReLU(inplace = True),
+            # nn.BatchNorm2d(out_channels),  # added batchnorm
+            nn.ReLU(),
 
         )
-
 
     def forward(self, x, bypass):
         return self.seq(self.center_crop_3d(x, bypass))
@@ -159,10 +165,11 @@ class Latent(nn.Module):
         self.latent = nn.Sequential(
             DConv2d(kernel_size=3, in_channels=in_channels, out_channels=mid_channels, padding=1),
             nn.BatchNorm2d(mid_channels),
-            nn.LeakyReLU(inplace = True),
+            nn.ReLU(),
+            # nn.Dropout(0.5),
             DConv2d(kernel_size=3, in_channels=mid_channels, out_channels=out_channels, padding=1),
             nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU(inplace = True),
+            nn.ReLU(),
         )
 
     def forward(self, x):
@@ -170,17 +177,17 @@ class Latent(nn.Module):
 
 
 class PyramidUNet(nn.Module):
-    def __init__(self, in_channel=12, out_channels=2, init_feature=16, depth=10, use_cst=False):
+    def __init__(self, in_channel=6, out_channels=2, init_feature=16, depth=10, use_cst=False):
         super(PyramidUNet, self).__init__()
 
-        self.input = InputDownsampler(in_channel, init_feature)
+        # self.input = InputDownsampler(in_channel, init_feature)
         self.cstinput = InputDownsampler(in_channel, init_feature, depth)
 
-        self.downsample_0 = Downsampler(init_feature, init_feature * 2)
-        self.downsample_1 = Downsampler(init_feature * 2, init_feature * 4)
-        self.downsample_2 = Downsampler(init_feature * 4, init_feature * 8)
+        self.downsample_0 = Downsampler(4 + init_feature, init_feature * 2)
+        self.downsample_1 = Downsampler(4 + init_feature * 2, init_feature * 4)
+        self.downsample_2 = Downsampler(4 + init_feature * 4, init_feature * 8)
 
-        self.latent = Latent(init_feature * 8, init_feature * 8, depth)
+        self.latent = Latent(4 + init_feature * 8, init_feature * 8, depth)
         self.latentflow_f = FlowPrediction(init_feature * 8, out_channels)
         self.latentflow_b = FlowPrediction(init_feature * 8, out_channels)
 
@@ -193,8 +200,7 @@ class PyramidUNet(nn.Module):
         self.pyramidflow_1b = FlowPrediction(init_feature * 2, out_channels)
 
         self.upsample_0 = Upsampler(init_feature * 2, init_feature)
-        self.pyramidflow_0f = FlowPrediction(init_feature, out_channels)
-        self.pyramidflow_0b = FlowPrediction(init_feature, out_channels)
+
 
         self.finalflow_f = OutputUpsampler(init_feature, out_channels)
         self.finalflow_b = OutputUpsampler(init_feature, out_channels)
@@ -205,39 +211,28 @@ class PyramidUNet(nn.Module):
         else:
             self.cst = lambda x: x
 
-    def forward(self, x):
-        """
-        :param x: input image [B X C X 10 X 436 X 1024] : FOR SINTEL CONFIG
-        :type x:
-        :return: 4 torch tensor tuples, if training else forwardfinal flow
-        :rtype: [torch.Size([1, 2, 9, 436, 1024]) -> forward_final_flow
-                torch.Size([1, 2, 9, 436, 1024]) -> backward_final_flow]
+    def intpolandcat(self, ff, out, fb):
+        if out.size()[2:] != ff.size()[2:]:
+            ff_ = F.interpolate(ff, size=(out.size(2), out.size(3)))
+            fb_ = F.interpolate(fb, size=(out.size(2), out.size(3)))
+            return torch.cat([ff_, out, fb_], 1)
+        else:
+            return torch.cat([ff, out, fb], 1)
 
-                [torch.Size([1, 2, 9, 108, 256]) -> forward_pyramid_1_flow
-                torch.Size([1, 2, 9, 108, 256]) -> backward_pyramid_1_flow]
+    def forward(self, x, ff=None, fb=None):
+        # ff, fb are 2x108x256
+        x = self.cstinput(self.cstd(x))
 
-                [torch.Size([1, 2, 9, 54, 128]) -> forward_pyramid_2_flow
-                torch.Size([1, 2, 9, 54, 128])-> backward_pyramid_2_flow]
+        out = self.intpolandcat(ff, x, fb)
 
-                [torch.Size([1, 2, 9, 27, 64]) -> forward_latent_flow
-                torch.Size([1, 2, 9, 27, 64]) -> backward_latent_flow]
-        """
-
-
-        cstx = self.cst(x)
-
-        stackx = torch.cat([x, x[:, 3:6], x[:, 0:3]], 1)
-        stckct = torch.cat([cstx, cstx[:, 3:6], cstx[:, 0:3]], 1)
-
-        outin = self.input(stackx)
-        outcst = self.cstinput(stckct)
-
-        out = outin + outcst
-
-        # out = self.cstinput(x)
         out_0, bypass_0 = self.downsample_0(out)
+        out_0 = self.intpolandcat(ff, out_0, fb)
+
         out_1, bypass_1 = self.downsample_1(out_0)
+        out_1 = self.intpolandcat(ff, out_1, fb)
+
         out_2, bypass_2 = self.downsample_2(out_1)
+        out_2 = self.intpolandcat(ff, out_2, fb)
 
         latentout = self.latent(out_2)
 
@@ -245,11 +240,11 @@ class PyramidUNet(nn.Module):
         pyramid_1 = self.upsample_1(pyramid_2, bypass_1)
         pyramid_0 = self.upsample_0(pyramid_1, bypass_0)
 
-        finalflow_b = self.finalflow_f(pyramid_0)
+        finalflow_b = self.finalflow_b(pyramid_0)
         finalflow_f = self.finalflow_f(pyramid_0)
-        
-        threshold = 1.
-        
+
+        threshold = 1e-2
+
         finalflow = (finalflow_f * threshold, finalflow_b * threshold)
 
         if self.training:
@@ -261,13 +256,15 @@ class PyramidUNet(nn.Module):
 
             pyramidflow_1f = self.pyramidflow_1f(pyramid_1)
             pyramidflow_1b = self.pyramidflow_1b(pyramid_1)
-            
-            ## scale threshold
-            latentflow = (latentflow_f * threshold , latentflow_b * threshold)
-            pyramidflow_2 = (pyramidflow_2f * threshold , pyramidflow_2b * threshold)
-            pyramidflow_1 = (pyramidflow_1f * threshold , pyramidflow_1b * threshold)
 
-            flows = (finalflow, pyramidflow_1, pyramidflow_2, latentflow)
+            ## scale threshold
+            latentflow = (latentflow_f * threshold, latentflow_b * threshold)
+            pyramidflow_2 = (pyramidflow_2f * threshold, pyramidflow_2b * threshold)
+            pyramidflow_1 = (pyramidflow_1f * threshold, pyramidflow_1b * threshold)
+
+            # flows = (finalflow, pyramidflow_1, pyramidflow_2, latentflow)
+
+            flows = (latentflow,pyramidflow_2, pyramidflow_1, finalflow)
 
             return flows
 
@@ -279,7 +276,7 @@ class PyramidUNet(nn.Module):
         unfold = torch.nn.Unfold(kernel_size=3, stride=1, padding=1)
         fold = torch.nn.Fold(output_size=(H, W), kernel_size=1, stride=1)
         img = unfold(frames).view(B, C, 9, -1).permute(0, 1, 3, 2)
-        mid = img[:, :, :, 4].unsqueeze(-1)
-        encoding = (img >= mid).float().view(-1, 9) * torch.tensor([128., 64., 32., 16., 0., 8., 4., 2., 1.])
+        mid = img[:, :, :, 4].unsqueeze(-1).cuda()
+        encoding = (img >= mid).float().view(-1, 9) * torch.tensor([128., 64., 32., 16., 0., 8., 4., 2., 1.]).cuda()
         encoding = encoding.sum(-1).view(B, C, -1) / 255.
         return fold(encoding)

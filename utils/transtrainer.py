@@ -9,9 +9,9 @@ import os
 from tqdm import tqdm
 
 #LOCAL IMPORTS
-from dataloader.sintelloader import SintelLoader
-from models.SeparableFPN import PyramidUNet
-from utils import (warper, AverageMeter, flow2rgb, replicatechannel,computeocclusion, ResizeImage)
+from dataloader.transloader import SintelLoader
+from models.TransSeparableFPN import PyramidUNet
+from utils import (warper, AverageMeter, flow2rgb, replicatechannel,computeocclusion, ResizeImage, plot_grad_flow, weights_init)
 from torchvision.transforms import (ToTensor, ToPILImage)
 
 
@@ -42,6 +42,7 @@ class FlowTrainer(object):
         self.stat_cache = None
 
     def initialize(self):
+        self.model.apply(weights_init)
         self.model.to(self.device)
         self.model = torch.nn.DataParallel(self.model, device_ids=self.gpu_ids)
         if self.load_model_path:
@@ -78,6 +79,11 @@ class FlowTrainer(object):
             # GET X and Frame 2
             # wdt = data['displacement'].to(self.device)
             frame = data['frame'].to(self.device)
+
+            pyra1_frame = F.interpolate(frame, size=(108, 256))
+            pyra2_frame = F.interpolate(frame, size=(54, 128))
+            laten_frame = F.interpolate(frame, size=(27, 64))
+
             flow = data['flow'].cpu()
             # frame.requires_grad = True
             flow.requires_grad = False
@@ -88,20 +94,58 @@ class FlowTrainer(object):
             torch.Size([1, 2, 9, 54, 128])      -> pyraflow2 size
             torch.Size([1, 2, 9, 27, 64])       -> pyraflow3 size
             """
-            pyra1_frame = data['pyra1_frame'].to(self.device)
+            # pyra1_frame = data['pyra1_frame'].to(self.device)
             # pyra1_frame.requires_grad = True
-            pyra2_frame = data['pyra2_frame'].to(self.device)
+            # pyra2_frame = data['pyra2_frame'].to(self.device)
             # pyra2_frame.requires_grad = True
-            laten_frame = data['laten_frame'].to(self.device)
+            # laten_frame = data['laten_frame'].to(self.device)
             # laten_frame.requires_grad = True
-            self.optimizer.zero_grad()
+            ff = data['ff'].to(self.device)
+            fb = data['fb'].to(self.device)
+
             # forward
             with torch.set_grad_enabled(True):
-                finalflow, pyraflow1, pyraflow2, latenflow = self.model(frame)
+                self.optimizer.zero_grad()
+                # flows = self.model(frame, ff, fb)
+                # for i, finalflow in enumerate(flows):
+                #     flowdim = finalflow[0].size()[2:]
+                #     framedim = frame.size()[2:]
+                #
+                #     if flowdim != framedim:
+                #         frame_ = F.interpolate(frame, size=(finalflow[0].size(2),finalflow[0].size(3)))
+                #         occlu_final, frame_final = self.warpframes(*finalflow, frame_)
+                #         loss = self.getcost(*frame_final, *occlu_final, frame_)
+                #     else:
+                #         occlu_final, frame_final = self.warpframes(*finalflow, frame)
+                #         loss = self.getcost(*frame_final, *occlu_final, frame)
+                #
+                #     self.optimizer.zero_grad()
+                #     if i < 3:
+                #         loss.backward(retain_graph=True)
+                #     else:
+                #         loss.backward()
+                #         self.writer.add_figure('Activations', plot_grad_flow(self.model.named_parameters()),
+                #                                self.global_step)
+                #     self.optimizer.step()
+                #
+                # self.avg_loss.update(loss.item(), i + 1)
+                # eper_final = self.epe(finalflow[1].detach(), flow.detach())
+                # self.avg_epe.update(eper_final.item(), i + 1)
+                #
+                # self.writer.add_scalar('Loss/train',
+                #                        self.avg_loss.avg, self.global_step)
+                #
+                # self.writer.add_scalar('EPE/train',
+                #                        self.avg_epe.avg, self.global_step)
+                #
+                # trainstream.set_postfix({'epoch': nb_epoch,
+                #                          'loss': self.avg_loss.avg,
+                #                          'epe': self.avg_epe.avg})
 
-                # pyra1_frame = F.interpolate(frame, size = (108, 256))
-                # pyra2_frame = F.interpolate(frame, size = (54, 128))
-                # laten_frame = F.interpolate(frame, size=(27, 64))
+
+                # DIfferent way above
+
+                latenflow, pyraflow2, pyraflow1, finalflow = self.model(frame, ff, fb)
 
                 occlu_final, frame_final = self.warpframes(*finalflow, frame)
                 occlu_pyra1, frame_pyra1 = self.warpframes(*pyraflow1, pyra1_frame)
@@ -115,16 +159,18 @@ class FlowTrainer(object):
                 cost_pyra2 = self.getcost(*frame_pyra2, *occlu_pyra2, pyra2_frame)
                 cost_laten = self.getcost(*frame_laten, *occlu_laten, laten_frame)
 
-                eper_final = self.epe(finalflow[1].cpu().detach(), flow.cpu().detach())
-
                 loss = cost_final + cost_pyra1 + cost_pyra2 + cost_laten
-
-                self.avg_loss.update(loss.item(), i + 1)
-                self.avg_epe.update(eper_final.item(), i + 1)
-
+                
+                # self.optimizer.zero_grad()
                 loss.backward()
+                self.avg_loss.update(loss.item(), i + 1)
+
+                self.writer.add_figure('Activations', plot_grad_flow(self.model.named_parameters()), self.global_step)
 
                 self.optimizer.step()
+
+                eper_final = self.epe(finalflow[1].detach(), flow.detach())
+                self.avg_epe.update(eper_final.item(), i + 1)
 
                 self.writer.add_scalar('Loss/train',
                                        self.avg_loss.avg, self.global_step)
@@ -135,6 +181,8 @@ class FlowTrainer(object):
                 trainstream.set_postfix({'epoch': nb_epoch,
                                          'loss': self.avg_loss.avg,
                                          'epe': self.avg_epe.avg})
+
+
         self.scheduler.step(loss)
         trainstream.close()
 
@@ -196,10 +244,12 @@ class FlowTrainer(object):
             for i, data in enumerate(valstream):
                 frame = data['frame'].to(self.device)
                 flow = data['flow'].cpu()
-                finalflow = self.model(frame)
+                ff = data['ff'].to(self.device)
+                fb = data['fb'].to(self.device)
+                finalflow = self.model(frame, ff, fb)
                 occlu_final, frame_final = self.warpframes(*finalflow, frame)
                 loss = self.getcost(*frame_final, *occlu_final, frame)
-                eper_final = self.epe(flow.cpu().detach(), finalflow[1].cpu().detach())
+                eper_final = self.epe(flow.detach(), finalflow[1].detach())
                 self.avg_loss.update(loss.item(), i + 1)
                 self.avg_epe.update(eper_final.item(), i + 1)
 
@@ -342,23 +392,22 @@ class FlowTrainer(object):
         ff_tloss = self.tripletloss(ff_truth, ff_frame, fb_frame)
         fb_tloss = self.tripletloss(ff_truth, ff_frame, fb_frame)
 
-        f_ploss, b_ploss = self.log_triplet_loss(ff_truth, ff_frame, fb_frame, ff_occlu, fb_occlu)
-
+        f_ploss, b_ploss = self.log_triplet_loss(ff_truth, ff_frame, fb_frame, 1. - ff_occlu, 1. - fb_occlu)
         total = f_ploss + b_ploss + ff_tloss + fb_tloss
-
         # total = ff_tloss + fb_tloss
 
         return total
 
     def epe(self, source, target):
         with torch.no_grad():
-            source = source.cpu().detach()
-            target = target.cpu().detach()
+            source = source.cuda()
+            target = target.cuda()
             # from termcolor import colored
             # print(colored(f'{source.shape, target.shape, source.max(), target.max()}','red'))
             B, C, H, W = source.size()
             diff = (source - target).reshape(-1, C * H * W)
-            return torch.norm(diff, p=2, dim=1).mean()
+            return torch.norm(diff)/B
+            # return torch.norm(diff, p=2, dim=1).mean().detach()
 
     def run(self):
         self.initialize()
