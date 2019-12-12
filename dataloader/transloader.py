@@ -5,14 +5,15 @@ from torchvision import transforms
 import torch
 import numpy as np
 import torch.nn.functional as F
-
+import torch.nn as nn
 from torchvision.transforms import ToPILImage, ToTensor, Resize
 
 from PIL import Image
-from utils import (get_train_val_test_list, getflow, ResizeImage)
+from utils import (get_train_val_test_list, getflow, ResizeImage, getImGradient)
 
 USE_CUT_OFF = 10
 import random
+
 
 """
 torch.Size([1, 2, 9, 436, 1024]) torch.Size([1, 2, 9, 436, 1024])
@@ -41,7 +42,7 @@ class SintelDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
-    def transEstimateFlow(self, pic1, pic2, newsize=(128, 54)):
+    def transEstimateFlow(self, pic1, pic2, newsize=(256, 108)):
         # note optimum newsize is (256,108
         def getnearindex(dmv, x):
             sqdiff = torch.sum(torch.pow((x - dmv).float(), 2), 1)
@@ -86,6 +87,12 @@ class SintelDataset(Dataset):
         backward = backward.float() / torch.tensor([*newsize[::-1]]).view(2, 1, 1).float()
         return forward, backward
 
+    def getFiltered(self, x):
+        Ix, Iy = getImGradient(x.unsqueeze(0), nocuda = True)
+        ixy = Ix * Iy
+        # avg = nn.MaxPool2d(kernel_size=3, padding=1, stride=1)
+        return 1. - F.max_pool2d(ixy, kernel_size = 3, padding = 1, stride = 1)[0]
+
     def __load_frames(self, paths):
         """
         NOTE THAT WE NEED DIFFERENT SIZE FRAME AT  DIFFERENT PYRAMID LEVEL SO WE RESIZE HERE
@@ -94,13 +101,14 @@ class SintelDataset(Dataset):
 
         images = [*map(lambda x: Image.open(x), paths)]
 
-        forward, backward = self.transEstimateFlow(*images)
+        # forward, backward = self.transEstimateFlow(*images)
 
-        final_frame = torch.cat([ToTensor()(x) for x in images], 0)
-
-        return {'frame': final_frame,
-                'ff': forward,
-                'fb': backward}
+        imten = [ToTensor()(x) for x in images]
+        subf = torch.cat([self.getFiltered(x) for x in imten], 0)
+        final_frame = torch.cat(imten, 0)
+        return {'frame': final_frame,'subf':subf}
+                # 'ff': forward,
+                # 'fb': backward}
 
         # if not self.is_test:
         #     pyra1_frame = torch.cat([ToTensor()(x.resize((256, 108))) for x in images], 0)
@@ -127,9 +135,15 @@ class SintelDataset(Dataset):
         flowtorch = flowtorch / torch.tensor([436., 1024.]).view(2, 1, 1)
         return flowtorch
 
+    def __load_motion(self, motion_path):
+        motion = torch.tensor(np.load(*motion_path)).float()
+        return transforms.Normalize(mean = [x.mean() for x in motion],
+                             std= [x.var() for x in motion])(motion)
+
     def __getitem__(self, idx):
         instances = self.dataset[idx]
         sample = self.__load_frames(instances['frame'])
+        sample['motion'] = self.__load_motion(instances['motion'])
         if not self.is_test:
             sample['occlusion'] = self.__load_occlusion(instances['occlusion'])
             sample['flow'] = self.__load_flow(instances['flow'])

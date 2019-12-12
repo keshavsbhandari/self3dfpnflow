@@ -4,9 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 
-import torch.nn as nn
-
-# class DConv2d(nn.Module):
+#
 #     def __init__(self, in_channels=3, out_channels=32, dilation=1, kernel_size=3, padding=1, stride=1, bias=True):
 #         super(DConv2d, self).__init__()
 #         kernels_per_layer = in_channels // out_channels if in_channels > out_channels else out_channels // in_channels
@@ -20,7 +18,7 @@ import torch.nn as nn
 #         return out
 
 
-# class DConvTranspose2d(nn.Module):
+#
 #     def __init__(self, in_channels=16, out_channels=32, dilation=1, kernel_size=3, padding=1, stride=1, bias=True,
 #                  output_padding=(0, 0)):
 #         super(DConvTranspose2d, self).__init__()
@@ -40,7 +38,7 @@ from torch.nn import ConvTranspose2d as DConvTranspose2d
 
 
 class InputDownsampler(nn.Module):
-    def __init__(self, in_channels=12, out_channels=16, depth=10):
+    def __init__(self, in_channels=12, out_channels=16):
         super(InputDownsampler, self).__init__()
         self.downsample = nn.Sequential(
             DConv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=(5, 5), stride=1,
@@ -56,7 +54,7 @@ class InputDownsampler(nn.Module):
 
 
 class OutputUpsampler(nn.Module):
-    def __init__(self, in_channels=16, out_channels=6, depth=10):
+    def __init__(self, in_channels=16, out_channels=6):
         super(OutputUpsampler, self).__init__()
         mid_channels = (in_channels + out_channels) // 2
         mid_channels = mid_channels + 1 if mid_channels % 2 != 0 else mid_channels
@@ -74,7 +72,7 @@ class OutputUpsampler(nn.Module):
             nn.ReLU(),
             nn.Conv2d(in_channels=mid_channels, out_channels=out_channels, kernel_size=(3, 3), padding=(1, 1)),
             nn.BatchNorm2d(out_channels, eps=1e-1, momentum=1e-5),
-            nn.Tanh(),
+            nn.ReLU(),
             # nn.ReLU(inplace = True),
             # nn.ReLU(inplace = True),
         )
@@ -84,13 +82,13 @@ class OutputUpsampler(nn.Module):
 
 
 class FlowPrediction(nn.Module):
-    def __init__(self, in_channels=16, out_channels=2, depth=10):
+    def __init__(self, in_channels=16, out_channels=2):
         super(FlowPrediction, self).__init__()
         self.predict = nn.Sequential(
             nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=(3, 3), padding=(1, 1)),
             nn.BatchNorm2d(out_channels, eps=1e-01, momentum=1e-5),
             # nn.ReLU(),
-            nn.Tanh(),
+            nn.ReLU(),
             # nn.ReLU(inplace = True),
         )
 
@@ -99,10 +97,10 @@ class FlowPrediction(nn.Module):
 
 
 class Downsampler(nn.Module):
-    def __init__(self, in_channels=16, out_channels=32, depth=10):
+    def __init__(self, in_channels=16, out_channels=32):
         super(Downsampler, self).__init__()
         mid_channels = (in_channels + out_channels) // 2
-        mid_channels = mid_channel + 1 if mid_channels % 2 != 0 else mid_channels
+        mid_channels = mid_channels + 1 if mid_channels % 2 != 0 else mid_channels
         self.seq = nn.Sequential(
             DConv2d(kernel_size=3, in_channels=in_channels, out_channels=mid_channels, padding=1),
             nn.BatchNorm2d(mid_channels),  # added batchnorm
@@ -125,7 +123,7 @@ class Downsampler(nn.Module):
 
 
 class Upsampler(nn.Module):
-    def __init__(self, in_channels=16, out_channels=32, depth=10):
+    def __init__(self, in_channels=16, out_channels=32):
         super(Upsampler, self).__init__()
 
         mid_channels = (in_channels + out_channels) // 2
@@ -159,7 +157,7 @@ class Upsampler(nn.Module):
 
 
 class Latent(nn.Module):
-    def __init__(self, in_channels=256, out_channels=256, depth=10):
+    def __init__(self, in_channels=256, out_channels=256):
         mid_channels = (in_channels + out_channels) // 2
         super(Latent, self).__init__()
         self.latent = nn.Sequential(
@@ -177,17 +175,17 @@ class Latent(nn.Module):
 
 
 class PyramidUNet(nn.Module):
-    def __init__(self, in_channel=6, out_channels=2, init_feature=16, depth=10, use_cst=False):
+    def __init__(self, in_channel=6, out_channels=2, init_feature=16, use_cst=False):
         super(PyramidUNet, self).__init__()
 
-        # self.input = InputDownsampler(in_channel, init_feature)
-        self.cstinput = InputDownsampler(in_channel, init_feature, depth)
+        self.input = InputDownsampler(in_channel, init_feature)
+        self.cstinput = InputDownsampler(2, init_feature)
 
-        self.downsample_0 = Downsampler(4 + init_feature, init_feature * 2)
-        self.downsample_1 = Downsampler(4 + init_feature * 2, init_feature * 4)
-        self.downsample_2 = Downsampler(4 + init_feature * 4, init_feature * 8)
+        self.downsample_0 = Downsampler(init_feature, init_feature * 2)
+        self.downsample_1 = Downsampler(init_feature * 2, init_feature * 4)
+        self.downsample_2 = Downsampler(init_feature * 4, init_feature * 8)
 
-        self.latent = Latent(4 + init_feature * 8, init_feature * 8, depth)
+        self.latent = Latent(init_feature * 8, init_feature * 8)
         self.latentflow_f = FlowPrediction(init_feature * 8, out_channels)
         self.latentflow_b = FlowPrediction(init_feature * 8, out_channels)
 
@@ -201,9 +199,11 @@ class PyramidUNet(nn.Module):
 
         self.upsample_0 = Upsampler(init_feature * 2, init_feature)
 
-
         self.finalflow_f = OutputUpsampler(init_feature, out_channels)
         self.finalflow_b = OutputUpsampler(init_feature, out_channels)
+
+        # self.a = nn.Parameter(torch.tensor([-0.0001]))
+        # self.b = nn.Parameter(torch.tensor([0.0001]))
 
         if use_cst:
             self.unfold = torch.nn.Unfold(kernel_size=3, padding=1)
@@ -219,20 +219,24 @@ class PyramidUNet(nn.Module):
         else:
             return torch.cat([ff, out, fb], 1)
 
-    def forward(self, x, ff=None, fb=None):
+    def forward(self, x,motion = None, ff=None, fb=None):
         # ff, fb are 2x108x256
-        x = self.cstinput(self.cstd(x))
+        # x = self.cstd(x)
+        # out = torch.cat([motion, x], 1)
+        x = self.input(x)
+        out = self.cstinput(motion)
 
-        out = self.intpolandcat(ff, x, fb)
+        out = x * out
+        # out = self.intpolandcat(motion, x)
 
         out_0, bypass_0 = self.downsample_0(out)
-        out_0 = self.intpolandcat(ff, out_0, fb)
+        # out_0 = self.intpolandcat(ff, out_0, fb)
 
         out_1, bypass_1 = self.downsample_1(out_0)
-        out_1 = self.intpolandcat(ff, out_1, fb)
+        # out_1 = self.intpolandcat(ff, out_1, fb)
 
         out_2, bypass_2 = self.downsample_2(out_1)
-        out_2 = self.intpolandcat(ff, out_2, fb)
+        # out_2 = self.intpolandcat(ff, out_2, fb)
 
         latentout = self.latent(out_2)
 
@@ -243,7 +247,8 @@ class PyramidUNet(nn.Module):
         finalflow_b = self.finalflow_b(pyramid_0)
         finalflow_f = self.finalflow_f(pyramid_0)
 
-        threshold = 1e-2
+
+        threshold = 1.
 
         finalflow = (finalflow_f * threshold, finalflow_b * threshold)
 
@@ -280,3 +285,15 @@ class PyramidUNet(nn.Module):
         encoding = (img >= mid).float().view(-1, 9) * torch.tensor([128., 64., 32., 16., 0., 8., 4., 2., 1.]).cuda()
         encoding = encoding.sum(-1).view(B, C, -1) / 255.
         return fold(encoding)
+
+    # def shrinker(self, x):
+    #     """
+    #                 (b-a)(x - min)
+    #         f(x) = ------------------  + a
+    #                 max - min
+    #     :param x:
+    #     :type x:
+    #     :return:
+    #     :rtype:
+    #     """
+    #     return self.a + (((self.b - self.a)*(x - x.min()))/ (x.max() - x.min() + 1))

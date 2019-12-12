@@ -13,6 +13,21 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
+
+def getImGradient(imten, channel = 3, nocuda = False):
+    Gx = torch.tensor([-1., 0., 1., -2., 0., 2., -1., 0., 1.]).view(3, 3)
+    Gy = Gx.transpose(1, 0)
+    kx = torch.stack([Gx] * channel).unsqueeze(1)
+    ky = torch.stack([Gy] * channel).unsqueeze(1)
+    if not nocuda:
+        kx = kx.cuda()
+        ky = ky.cuda()
+
+
+    Ix = F.conv2d(input = imten, stride=1,weight = kx, padding = 1, groups = channel)
+    Iy = F.conv2d(input = imten, stride=1,weight = ky, padding = 1, groups = channel)
+    return Ix, Iy
+
 def weights_init(m):
     if isinstance(m, nn.Conv2d):
         nn.init.xavier_uniform_(m.weight.data)
@@ -142,6 +157,12 @@ def getSintelPairFrame(root, sample=None, test=False, n=2):
     def getflowpath(f):
         return f.replace('final', 'flow').replace('.png', '.flo')
 
+    def getmotionpath(f):
+        f = f.replace('final', 'motion')
+        root, name = f.split('frame_')
+        name = str(int(name.replace('.png','')))+'.npy'
+        return root + name
+
     def getocclusionpath(f):
         return f.replace('final', 'occlusions')
 
@@ -150,7 +171,7 @@ def getSintelPairFrame(root, sample=None, test=False, n=2):
     datalist = chain.from_iterable(map(chunker, map(getdirdata, subroot)))
     if test: return nsample([{'frame': frames} for frames in datalist])
     datalist = [
-        {'flow': [*map(getflowpath, frames[:-1])], 'occlusion': [*map(getocclusionpath, frames[:-1])], 'frame': frames}
+        {'motion':[*map(getmotionpath, frames[:-1])], 'flow': [*map(getflowpath, frames[:-1])], 'occlusion': [*map(getocclusionpath, frames[:-1])], 'frame': frames}
         for frames in datalist]
     return nsample(datalist)
 

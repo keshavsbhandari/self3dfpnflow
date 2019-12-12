@@ -11,7 +11,7 @@ from tqdm import tqdm
 #LOCAL IMPORTS
 from dataloader.transloader import SintelLoader
 from models.TransSeparableFPN import PyramidUNet
-from utils import (warper, AverageMeter, flow2rgb, replicatechannel,computeocclusion, ResizeImage, plot_grad_flow, weights_init)
+from utils import (warper, AverageMeter, flow2rgb, replicatechannel,computeocclusion, ResizeImage, plot_grad_flow, weights_init, getImGradient)
 from torchvision.transforms import (ToTensor, ToPILImage)
 
 
@@ -100,9 +100,10 @@ class FlowTrainer(object):
             # pyra2_frame.requires_grad = True
             # laten_frame = data['laten_frame'].to(self.device)
             # laten_frame.requires_grad = True
-            ff = data['ff'].to(self.device)
-            fb = data['fb'].to(self.device)
-
+            # ff = data['ff'].to(self.device)
+            # fb = data['fb'].to(self.device)
+            motion = data['motion'].to(self.device)
+            subf = data['subf'].to(self.device)
             # forward
             with torch.set_grad_enabled(True):
                 self.optimizer.zero_grad()
@@ -145,7 +146,9 @@ class FlowTrainer(object):
 
                 # DIfferent way above
 
-                latenflow, pyraflow2, pyraflow1, finalflow = self.model(frame, ff, fb)
+                # print(motion.shape, frame.shape)
+
+                latenflow, pyraflow2, pyraflow1, finalflow = self.model(subf, motion)
 
                 occlu_final, frame_final = self.warpframes(*finalflow, frame)
                 occlu_pyra1, frame_pyra1 = self.warpframes(*pyraflow1, pyra1_frame)
@@ -154,13 +157,14 @@ class FlowTrainer(object):
 
                 # print(occlu_final[0].shape)
 
-                cost_final = self.getcost(*frame_final, *occlu_final, frame)
-                cost_pyra1 = self.getcost(*frame_pyra1, *occlu_pyra1, pyra1_frame)
-                cost_pyra2 = self.getcost(*frame_pyra2, *occlu_pyra2, pyra2_frame)
-                cost_laten = self.getcost(*frame_laten, *occlu_laten, laten_frame)
+                cost_final = self.getcost(*frame_final, *occlu_final, frame, *finalflow)
+                cost_pyra1 = self.getcost(*frame_pyra1, *occlu_pyra1, pyra1_frame, *pyraflow1)
+                cost_pyra2 = self.getcost(*frame_pyra2, *occlu_pyra2, pyra2_frame, *pyraflow2)
+                cost_laten = self.getcost(*frame_laten, *occlu_laten, laten_frame, *latenflow)
 
                 loss = cost_final + cost_pyra1 + cost_pyra2 + cost_laten
-                
+
+
                 # self.optimizer.zero_grad()
                 loss.backward()
                 self.avg_loss.update(loss.item(), i + 1)
@@ -208,8 +212,11 @@ class FlowTrainer(object):
                                      'epoch': nb_epoch,
                                      'pred_frame': fb_frame_final[0:4],
                                      'gt_frame': frame[0:4,:3],
+                                     'subf': subf[0:4, :3],
                                      'pred_flow': flow2rgb(fb_final[0:4], False),
                                      'gt_flow': flow2rgb(flow[0:4],False),
+                                     # 'ff_in': flow2rgb(ff[0:4], False),
+                                     # 'fb_in': flow2rgb(fb[0:4], False),
                                      'pred_occ': 1. - fb_occlu_final[0:4],
                                      'gt_occ': data['occlusion'][0:4]})
 
@@ -218,18 +225,24 @@ class FlowTrainer(object):
         with torch.no_grad():
             pred_frame = metrics.get('pred_frame')
             gt_frame = metrics.get('gt_frame')
+            subf= metrics.get('subf')
             pred_flow = metrics.get('pred_flow')
             gt_flow = metrics.get('gt_flow')
+
+            # ff_in = metrics.get('ff_in')
+            # fb_in = metrics.get('fb_in')
             pred_occ = replicatechannel(metrics.get('pred_occ'))
             gt_occ = replicatechannel(metrics.get('gt_occ'))
 
-            data = torch.cat([pred_frame.cuda(), gt_frame.cuda(), pred_flow.cuda(), gt_flow.cuda(), pred_occ.cuda(), gt_occ.cuda()],0)
-
+            data = torch.cat([pred_frame.cuda(), gt_frame.cuda(),subf.cuda(), pred_flow.cuda(), gt_flow.cuda(), pred_occ.cuda(), gt_occ.cuda()],0)
+            # ff_data = make_grid(torch.cat([ff_in.cuda(),fb_in.cuda()],0).cpu(), nrow=4)
             data = data.cpu()
 
             grid = make_grid(data, nrow=4)
             grid = ToTensor()((ToPILImage()(grid)).resize((4106//6,2630//4)))
             self.writer.add_images('TRAIN/Results', grid.unsqueeze(0), metrics.get('n_batch'))
+            # self.writer.add_images('INPUT/Flows_prior', ff_data.unsqueeze(0), metrics.get('n_batch'))
+
         self.val(metrics.get('epoch'))
 
     def val(self, nb_epoch):
@@ -244,11 +257,15 @@ class FlowTrainer(object):
             for i, data in enumerate(valstream):
                 frame = data['frame'].to(self.device)
                 flow = data['flow'].cpu()
-                ff = data['ff'].to(self.device)
-                fb = data['fb'].to(self.device)
-                finalflow = self.model(frame, ff, fb)
+                motion = data['motion'].to(self.device)
+                # ff = data['ff'].to(self.device)
+                # fb = data['fb'].to(self.device)
+                finalflow = self.model(frame, motion)
+                finalflow = finalflow[::-1]
                 occlu_final, frame_final = self.warpframes(*finalflow, frame)
-                loss = self.getcost(*frame_final, *occlu_final, frame)
+
+
+                loss = self.getcost(*frame_final, *occlu_final, frame, *finalflow)
                 eper_final = self.epe(flow.detach(), finalflow[1].detach())
                 self.avg_loss.update(loss.item(), i + 1)
                 self.avg_epe.update(eper_final.item(), i + 1)
@@ -348,9 +365,9 @@ class FlowTrainer(object):
             gt_frame = metrics.get('gt_frame').cpu()
             pred_flow = metrics.get('pred_flow').cpu()
             pred_occ = replicatechannel(metrics.get('pred_occ')).cpu()
-            data = torch.stack([pred_frame, gt_frame, pred_flow, pred_occ], 0)
-            data = data.reshape(-1, 3, data.size(3), data.size(4)).cpu()
-            grid = make_grid(data, nrow=4)
+            data = torch.stack([pred_frame, gt_frame, pred_flow, pred_occ], 0).cpu()
+            # data = data.reshape(-1, 3, data.size(3), data.size(4)).cpu()
+            grid = make_grid(data, nrow=3)
             self.writer.add_images('Test/Results', grid.unsqueeze(0), metrics.get('n_batch'))
 
     def loggings(self, **metrics):
@@ -381,19 +398,39 @@ class FlowTrainer(object):
         # loss = loss.sum() / (mask.sum() + 1e-10)
         return pos, neg
 
-    def getcost(self, ff_frame, fb_frame, ff_occlu, fb_occlu, frame):
+    def getcost(self, ff_frame, fb_frame, ff_occlu, fb_occlu, frame, ff_flow, fb_flow):
 
         ff_frame = ff_frame.cuda()
         fb_frame = fb_frame.cuda()
         frame = frame.cuda()
 
+        # klloss = F.kl_div(ff_frame, fb_frame)
+        ff_framex, ff_framey = getImGradient(frame[:, :3])
+        fb_framex, fb_framey = getImGradient(frame[:, 3:])
+        # print('----BEG---')
+        # print(frame[:,:3].shape, ff_flow[:,:1].shape, ff_framex.shape, ff_flow[:,1:].shape, ff_framey.shape, ff_frame.shape)
+        # print('--------')
+        # print(frame[:, 3:].shape, fb_flow[:, :1].shape, fb_framex.shape, fb_flow[:, 1:].shape, fb_framey.shape,
+        #       fb_frame.shape)
+        # print('----END---')
+        kd1 = torch.pow(torch.pow(frame[:,:3] + ff_flow[:,:1] * ff_framex + ff_flow[:,1:] * ff_framey - ff_frame, 2).mean(),0.5)
+        kd2 = torch.pow(torch.pow(frame[:, 3:] + fb_flow[:, :1] * fb_framex + fb_flow[:, 1:] * fb_framey - fb_frame,2).mean(), 0.5)
+
+        # kd1 = torch.pow(kd1 + 1e-2, 1e-4)
+        kd = (kd1 + kd2)/2.
+
+
+
         ff_truth, fb_truth = frame[ :, 3:], frame[:, :3]
+
+        # klloss1 = F.kl_div(ff_frame, ff_truth)
+        # klloss2 = F.kl_div(fb_frame, fb_truth)
 
         ff_tloss = self.tripletloss(ff_truth, ff_frame, fb_frame)
         fb_tloss = self.tripletloss(ff_truth, ff_frame, fb_frame)
 
         f_ploss, b_ploss = self.log_triplet_loss(ff_truth, ff_frame, fb_frame, 1. - ff_occlu, 1. - fb_occlu)
-        total = f_ploss + b_ploss + ff_tloss + fb_tloss
+        total = f_ploss + b_ploss + ff_tloss + fb_tloss +kd
         # total = ff_tloss + fb_tloss
 
         return total
